@@ -1,17 +1,22 @@
+# std lib
 import os
-import requests
-from bs4 import BeautifulSoup
 from urllib.parse import urljoin
 
+# third party
+import requests
+from bs4 import BeautifulSoup
+from ebooklib import epub
+
+
 BASE_PATH = os.path.dirname(os.path.abspath(__file__))
-CHAPTERS_PATH = os.path.join(BASE_PATH, 'chapters')
+EPUB_PATH = os.path.join(BASE_PATH, 'epubs')
 
 BOOK_BASE_URL = 'http://gameprogrammingpatterns.com'
 BOOK_TOC_URL = urljoin(BOOK_BASE_URL, '/contents.html')
 
 
-def get_toc_links():
-    """Fetch chapters' links from the index of the book.
+def get_index_links():
+    """Fetch links from the index of the book.
 
     Return a list of sections, where each section contains a
     list of its links::
@@ -20,11 +25,9 @@ def get_toc_links():
             [
                 {'title': '<chapter title>', 'url': '<chapter url>'},
                 {'title': '<chapter title>', 'url': '<chapter url>'},
-                {'title': '<chapter title>', 'url': '<chapter url>'},
                 (...)
             ],
             [
-                {'title': '<chapter title>', 'url': '<chapter url>'},
                 {'title': '<chapter title>', 'url': '<chapter url>'},
                 {'title': '<chapter title>', 'url': '<chapter url>'},
                 (...)
@@ -34,7 +37,7 @@ def get_toc_links():
     """
     req = requests.get(BOOK_TOC_URL)
     soup = BeautifulSoup(req.text, 'lxml', from_encoding='UTF-8')
-    links = []
+    sections = []
 
     for section in soup.select('ol[type=I] > li'):
         section_anchors = section.select('a[href]')
@@ -44,54 +47,17 @@ def get_toc_links():
                 'title': anchor.get_text(),
                 'url': urljoin(BOOK_BASE_URL, anchor['href'])
             })
-        links.append(section_links)
+        sections.append(section_links)
 
-    return links
+    return sections
 
 
-def create_chapters_htmls(toc_links):
-    """Download the chapters's htmls to the file system.
-
-    Each chapter will be saved in a different file, and the corresponding
-    file path will be inserted in each dict that is inside each section that
-    is inside the ``toc_links`` received parameter.
-
-    So, if the parameter came like this::
-
-        [
-            [
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                (...)
-            ]
-            (...)
-        ]
-
-    It will end up like this::
-
-        [
-            [
-                {'title': '<chapter title>', 'url': '<chapter url>',
-                 'file_path': '<path_to_the_file>'},
-                {'title': '<chapter title>', 'url': '<chapter url>',
-                 'file_path': '<path_to_the_file>'},
-                (...)
-            ]
-            (...)
-        ]
-    """
-    if not os.path.isdir(CHAPTERS_PATH):
-        os.mkdir(CHAPTERS_PATH)
-
-    for section_idx, section in enumerate(toc_links):
+def fetch_links_contents(sections):
+    """Update the links in the sections with their HTML contents."""
+    for section_idx, section in enumerate(sections):
         for link_index, link in enumerate(section):
-            file_path = os.path.join(
-                CHAPTERS_PATH,
-                's{}_c{}.html'.format(str(section_idx).zfill(2),
-                                      str(link_index).zfill(2))
-            )
-            print('Fetching chapter "{}" -> {} '.format(link['title'],
-                                                        file_path))
+            print('Fetching chapter "{}"'.format(link['title']))
+
             # Fetch content
             req = requests.get(link['url'])
             soup = BeautifulSoup(req.text, 'lxml', from_encoding='UTF-8')
@@ -110,22 +76,62 @@ def create_chapters_htmls(toc_links):
                 if not img_tag['src'].startswith('http'):
                     img_tag['src'] = urljoin(BOOK_BASE_URL, img_tag['src'])
 
-            # Save file
-            with open(file_path, 'w') as chapter_file:
-                chapter_file.write('<html><head><meta charset="UTF-8">'
-                                   '</head><body>')
-                chapter_file.write(content.prettify())
-                chapter_file.write('</body></html>')
+            # Update link with content and file name
+            content = '<html><head><meta charset="UTF-8"></head><body>' \
+                      '{}</body></html>'.format(content.prettify())
+            file_name = 's{}_c{}.htmlx'.format(str(section_idx).zfill(2),
+                                               str(link_index).zfill(2))
+            link.update({
+                'content': content,
+                'file_name': file_name
+            })
 
-            # Create a key for the file path in the link dict
-            link['file_path'] = file_path
+
+def create_book(sections):
+    """Receive the sections list and create the epub file."""
+    book = epub.EpubBook()
+
+    # set metadata
+    book.set_identifier('gpp')
+    book.set_title('Game Programming Patterns')
+    book.set_language('en')
+    book.add_author('Robert Nystrom')
+
+    # create chapters
+    chapters = []
+    for section in sections:
+        for link_index, link in enumerate(section):
+            title = link['title']
+            if link_index > 0:
+                title = ' - {}'.format(title)
+            chapter = epub.EpubHtml(title=title,
+                                    file_name=link['file_name'],
+                                    content=link['content'])
+            book.add_item(chapter)
+            chapters.append(chapter)
+
+    # book's Table of contents
+    book.toc = chapters
+
+    # add default NCX and Nav file
+    book.add_item(epub.EpubNcx())
+    book.add_item(epub.EpubNav())
+
+    # book's spine
+    book.spine = chapters
+
+    if not os.path.isdir(EPUB_PATH):
+        os.mkdir(EPUB_PATH)
+
+    file_path = os.path.join(EPUB_PATH, 'game-programming-patterns.epub')
+    epub.write_epub(file_path, book, {})
+    print('Book created: {}'.format(file_path))
 
 
 def generate():
-    toc_links = get_toc_links()
-    create_chapters_htmls(toc_links)
-    from pprint import pprint
-    pprint(toc_links)
+    sections = get_index_links()
+    fetch_links_contents(sections)
+    create_book(sections)
 
 
 if __name__ == '__main__':
