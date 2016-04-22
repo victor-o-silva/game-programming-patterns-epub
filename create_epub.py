@@ -1,6 +1,6 @@
 # std lib
 import os
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 # third party
 import requests
@@ -12,6 +12,10 @@ BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 EPUB_PATH = os.path.join(BASE_PATH, 'epubs')
 
 BOOK_BASE_URL = 'http://gameprogrammingpatterns.com'
+
+parsed_url = urlparse(BOOK_BASE_URL)
+BOOK_SERVER_URL = parsed_url.scheme + '://' + parsed_url.netloc
+
 BOOK_TOC_URL = urljoin(BOOK_BASE_URL, '/contents.html')
 
 
@@ -19,22 +23,9 @@ def get_index_links():
     """Fetch links from the index of the book.
 
     Return a list of sections, where each section contains a
-    list of its links::
-
-        [
-            [
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                (...)
-            ],
-            [
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                {'title': '<chapter title>', 'url': '<chapter url>'},
-                (...)
-            ],
-            (...)
-        ]
+    list of its links.
     """
+    print('Fetching links from index')
     req = requests.get(BOOK_TOC_URL)
     soup = BeautifulSoup(req.text, 'lxml', from_encoding='UTF-8')
     sections = []
@@ -53,8 +44,8 @@ def get_index_links():
 
 
 def fetch_links_contents(sections):
-    """Update the links in the sections with their HTML contents."""
-    for section_idx, section in enumerate(sections):
+    """Fetch data for the links in the sections and update them."""
+    for section_index, section in enumerate(sections):
         for link_index, link in enumerate(section):
             print('Fetching chapter "{}"'.format(link['title']))
 
@@ -71,24 +62,55 @@ def fetch_links_contents(sections):
             for anchor in content.select('a'):
                 anchor.replaceWith(anchor.text)
 
-            # Fix images' src attributes
-            for img_tag in content.select('img[src]'):
-                if not img_tag['src'].startswith('http'):
-                    img_tag['src'] = urljoin(BOOK_BASE_URL, img_tag['src'])
+            # Fetch images' contents and create image items
+            chapter_images = []
+            for img_index, img_tag in enumerate(content.select('img[src]')):
+                # Find image absolute URL
+                if img_tag['src'].startswith('http'):  # img on another server
+                    img_src = img_tag['src']
+                else:  # image on same server as the book
+                    if img_tag['src'].startswith('/'):  # absolute path
+                        img_src = urljoin(BOOK_SERVER_URL, img_tag['src'])
+                    else:  # relative path
+                        img_src = urljoin(link['url'], img_tag['src'])
+                # Build image file name to use inside epub
+                img_extension = img_tag['src'].split('.')[-1]
+                img_file_name = 's{}_c{}_i{}.{}'.format(
+                    str(section_index).zfill(2),
+                    str(link_index).zfill(2),
+                    str(img_index).zfill(2),
+                    img_extension
+                )
+                # Fetch image content and create book item for it
+                print(' - Fetching image {}'.format(img_tag['src']))
+                req = requests.get(img_src)
+                if req.status_code == 200:
+                    image_item = epub.EpubItem(
+                        file_name=img_file_name,
+                        media_type='image/'.format(img_extension),
+                        content=req.content
+                    )
+                    chapter_images.append(image_item)
+                    # Update tag's src attr to the image item we just created
+                    img_tag['src'] = img_file_name
+                else:
+                    img_tag['src'] = ''
 
-            # Update link with content and file name
+            # Update link with content, file name and images
             content = '<html><head><meta charset="UTF-8"></head><body>' \
                       '{}</body></html>'.format(content.prettify())
-            file_name = 's{}_c{}.htmlx'.format(str(section_idx).zfill(2),
+            file_name = 's{}_c{}.htmlx'.format(str(section_index).zfill(2),
                                                str(link_index).zfill(2))
             link.update({
                 'content': content,
-                'file_name': file_name
+                'file_name': file_name,
+                'images_items': chapter_images
             })
 
 
 def create_book(sections):
     """Receive the sections list and create the epub file."""
+    print('Creating ebook...')
     book = epub.EpubBook()
 
     # set metadata
@@ -99,7 +121,7 @@ def create_book(sections):
 
     # create chapters
     chapters = []
-    for section in sections:
+    for section_index, section in enumerate(sections):
         for link_index, link in enumerate(section):
             title = link['title']
             if link_index > 0:
@@ -107,8 +129,12 @@ def create_book(sections):
             chapter = epub.EpubHtml(title=title,
                                     file_name=link['file_name'],
                                     content=link['content'])
+
             book.add_item(chapter)
             chapters.append(chapter)
+
+            for image_item in link['images_items']:
+                book.add_item(image_item)
 
     # book's Table of contents
     book.toc = chapters
