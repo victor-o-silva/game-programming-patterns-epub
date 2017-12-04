@@ -128,6 +128,7 @@ def create_book(sections):
                 title = ' - {}'.format(title)
             chapter = epub.EpubHtml(title=title,
                                     file_name=link['file_name'],
+                                    media_type='application/xhtml+xml',
                                     content=link['content'])
 
             book.add_item(chapter)
